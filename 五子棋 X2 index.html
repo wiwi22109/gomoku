@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>五子棋</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#e7ecee;--panel:#f6f8f9;--ink:#1d2a30;--muted:#5b6c73;--line:#c5d0d4;--accent:#b8432f;--btn:#1d2a30;--btnink:#f6f8f9;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#12181b;--panel:#1b2428;--ink:#e6edf0;--muted:#95a6ad;--line:#2c3a40;--accent:#e0674f;--btn:#e6edf0;--btnink:#12181b}}
+:root[data-theme="dark"]{--bg:#12181b;--panel:#1b2428;--ink:#e6edf0;--muted:#95a6ad;--line:#2c3a40;--accent:#e0674f;--btn:#e6edf0;--btnink:#12181b}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"Noto Sans TC","PingFang TC","Microsoft JhengHei",system-ui,sans-serif;min-height:100vh;display:flex;justify-content:center}
+main{width:100%;max-width:640px;padding:20px 16px 28px}
+h1{font-family:"Noto Serif TC","Songti TC",serif;font-size:2rem;margin:0 0 10px;letter-spacing:.12em}
+#status{margin:0 0 14px;font-size:1.05rem;min-height:3.2em;color:var(--muted);line-height:1.6}
+#status.end{color:var(--accent);font-weight:700}
+canvas{display:block;border-radius:6px;box-shadow:0 6px 24px rgba(0,0,0,.28);touch-action:manipulation;cursor:pointer}
+.controls{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px;align-items:flex-end}
+.controls.top{margin:0 0 14px}
+.controls label{display:flex;flex-direction:column;font-size:.85rem;color:var(--muted);gap:4px}
+input,select,button{font:inherit;font-size:.95rem;padding:9px 12px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink)}
+input{width:9em;letter-spacing:.2em;text-transform:uppercase}
+button{background:var(--btn);color:var(--btnink);border-color:var(--btn);cursor:pointer;font-weight:600}
+button.alt{background:var(--panel);color:var(--ink);border-color:var(--line)}
+button:disabled{opacity:.45;cursor:default}
+.btns{display:flex;gap:10px;margin-left:auto}
+input:focus-visible,select:focus-visible,button:focus-visible,canvas:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.code{font-size:1.3rem;font-weight:700;letter-spacing:.25em;align-self:center}
+p.hint{margin:18px 0 0;font-size:.85rem;color:var(--muted);line-height:1.7}
+</style>
+</head>
+<body>
+<main>
+  <h1>五子棋</h1>
+  <div class="controls top">
+    <label>模式
+      <select id="mode"><option value="ai">單人（對戰電腦）</option><option value="online">雙人（連線對戰）</option></select>
+    </label>
+  </div>
+  <p id="status" role="status" aria-live="polite"></p>
+  <div id="wrap"><canvas id="cv" tabindex="0" aria-label="五子棋棋盤"></canvas></div>
+
+  <div class="controls" id="aiPanel">
+    <label>難度
+      <select id="level"><option value="easy">簡單</option><option value="normal" selected>普通</option><option value="hard">困難</option></select>
+    </label>
+    <label>我執
+      <select id="side"><option value="1">黑棋（先手）</option><option value="2">白棋（後手）</option></select>
+    </label>
+    <div class="btns">
+      <button class="alt" id="undo">悔棋</button>
+      <button id="newgame">重新開始</button>
+    </div>
+  </div>
+
+  <div class="controls" id="lobby" hidden>
+    <button id="host">建立房間</button>
+    <label>朋友給你的代碼
+      <input id="code" maxlength="5" autocapitalize="characters" autocomplete="off" placeholder="例如 K7M2P">
+    </label>
+    <button class="alt" id="join">加入房間</button>
+  </div>
+  <div class="controls" id="room" hidden>
+    <span class="code" id="rc"></span>
+    <button class="alt" id="copy">複製邀請連結</button>
+    <button id="restart" disabled>再來一局</button>
+  </div>
+
+  <p class="hint">單人模式可選難度與先後手。連線模式請一人建立房間，把代碼或邀請連結傳給朋友；房主先執黑，每按一次「再來一局」雙方互換黑白。</p>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+(function(){
+  var N=15, D=[[0,1],[1,0],[1,1],[1,-1]];
+  function $(i){return document.getElementById(i)}
+  var cv=$('cv'), ctx=cv.getContext('2d'), wrap=$('wrap'), statusEl=$('status');
+  var modeEl=$('mode'), levelEl=$('level'), sideEl=$('side'), codeEl=$('code');
+  var aiPanel=$('aiPanel'), lobby=$('lobby'), room=$('room');
+  var undoBtn=$('undo'), restartBtn=$('restart'), copyBtn=$('copy');
+  var mode='ai', board=new Array(N*N).fill(0), hist=[], turn=1, over=false, win=null, hover=null, thinking=false, size=0, cell=0;
+  var peer=null, conn=null, live=false, myColor=0, roomCode='', timer=null;
+  var msg='點「建立房間」，或輸入朋友給你的代碼加入。';
+
+  function inb(r,c){return r>=0&&r<N&&c>=0&&c<N}
+  function g(r,c){return board[r*N+c]}
+  function name(p){return p===1?'黑':'白'}
+  function mine(){return mode==='ai'?+sideEl.value:myColor}
+
+  function findWin(r,c,p){
+    for(var i=0;i<4;i++){
+      var cells=[[r,c]];
+      for(var s=1;s>=-1;s-=2){
+        var rr=r+D[i][0]*s, cc=c+D[i][1]*s;
+        while(inb(rr,cc)&&g(rr,cc)===p){cells.push([rr,cc]);rr+=D[i][0]*s;cc+=D[i][1]*s}
+      }
+      if(cells.length>=5) return cells;
+    }
+    return null;
+  }
+
+  /* ---------- AI ---------- */
+  function sc(n,open){
+    if(n>=5) return 1e6;
+    if(open===0) return 0;
+    var t={4:[0,5000,50000],3:[0,100,2000],2:[0,10,100],1:[0,1,10]};
+    return t[n][open];
+  }
+  function pat(r,c,p,dirs){
+    var total=0;
+    for(var i=0;i<4;i++){
+      var n=1, open=0;
+      for(var s=1;s>=-1;s-=2){
+        var rr=r+D[i][0]*s, cc=c+D[i][1]*s;
+        while(inb(rr,cc)&&g(rr,cc)===p){n++;rr+=D[i][0]*s;cc+=D[i][1]*s}
+        if(inb(rr,cc)&&g(rr,cc)===0) open++;
+      }
+      var v=sc(n,open); total+=v; if(dirs) dirs.push(v);
+    }
+    return total;
+  }
+  function aiPick(me){
+    var foe=3-me, best=-1, picks=[], all=[], mid=(N-1)/2, lv=levelEl.value;
+    if(hist.length===0) return [7,7];
+    for(var r=0;r<N;r++) for(var c=0;c<N;c++){
+      if(g(r,c)!==0) continue;
+      var near=false;
+      for(var a0=-2;a0<=2&&!near;a0++) for(var b0=-2;b0<=2;b0++){
+        if(inb(r+a0,c+b0)&&g(r+a0,c+b0)!==0){near=true;break}
+      }
+      if(!near) continue;
+      all.push([r,c]);
+      var da=[], dd=[], a=pat(r,c,me,da), d=pat(r,c,foe,dd), s, off=(Math.abs(r-mid)+Math.abs(c-mid))*0.1;
+      if(lv==='easy') s=a+d*0.6+Math.random()*150;
+      else if(lv==='hard'){
+        var ta=da.filter(function(x){return x>=2000}).length, td=dd.filter(function(x){return x>=2000}).length;
+        s=a*1.2+d*1.1+(ta>=2?3000:0)+(td>=2?2500:0)-off;
+      } else s=a*1.05+d-off;
+      if(s>best+1e-9){best=s;picks=[[r,c]]} else if(Math.abs(s-best)<=1e-9){picks.push([r,c])}
+    }
+    if(lv==='easy'&&Math.random()<0.35) return all[Math.floor(Math.random()*all.length)];
+    return picks[Math.floor(Math.random()*picks.length)];
+  }
+  function maybeAI(){
+    if(mode!=='ai'||over||turn===mine()) return;
+    thinking=true; setStatus();
+    setTimeout(function(){
+      thinking=false;
+      if(mode!=='ai'||over||turn===mine()){setStatus();return}
+      var m=aiPick(turn); place(m[0],m[1]);
+    },380);
+  }
+  function newAI(){ thinking=false; reset(false); maybeAI(); }
+  function undo(){
+    if(mode!=='ai'||thinking||hist.length===0) return;
+    var steps=(hist[hist.length-1][2]===mine())?1:2;
+    if(hist.length<steps) steps=hist.length;
+    while(steps-->0){var m=hist.pop();board[m[0]*N+m[1]]=0;turn=m[2]}
+    over=false; win=null; setStatus(); draw();
+  }
+
+  /* ---------- shared game state ---------- */
+  function setStatus(){
+    var t='', m=mine();
+    statusEl.className='';
+    if(mode==='online'&&!live) t=msg;
+    else if(over){
+      statusEl.className='end';
+      if(win) t=g(win[0][0],win[0][1])===m?'你贏了！':(mode==='ai'?'電腦獲勝':'對方獲勝');
+      else t='平手，棋盤已滿';
+      if(mode==='online') t+='　按「再來一局」可以繼續。';
+    } else if(turn===m) t='輪到你下（你執'+name(m)+'棋）';
+    else t=(mode==='ai'?'電腦思考中…':'等待對方下棋…')+'（你執'+name(m)+'棋）';
+    statusEl.textContent=t;
+    undoBtn.disabled=hist.length===0||thinking;
+  }
+  function say(t){msg=t;setStatus()}
+
+  function place(r,c){
+    var p=turn;
+    board[r*N+c]=p; hist.push([r,c,p]);
+    var w=findWin(r,c,p);
+    if(w){win=w;over=true}
+    else if(hist.length===N*N){over=true}
+    else turn=3-turn;
+    setStatus(); draw();
+  }
+  function reset(swap){
+    board=new Array(N*N).fill(0); hist=[]; turn=1; over=false; win=null;
+    if(swap) myColor=3-myColor;
+    setStatus(); draw();
+  }
+  function canMove(){
+    return !over&&!thinking&&turn===mine()&&(mode==='ai'||live);
+  }
+
+  /* ---------- online ---------- */
+  function cleanup(){
+    clearTimeout(timer);
+    var c=conn, p=peer;
+    conn=null; peer=null; live=false; myColor=0;
+    try{if(c)c.close()}catch(e){}
+    try{if(p)p.destroy()}catch(e){}
+    restartBtn.disabled=true;
+  }
+  function backToLobby(t){
+    cleanup(); reset(false); lobby.hidden=false; room.hidden=true; say(t);
+  }
+  function genCode(){
+    var a='ABCDEFGHJKLMNPQRSTUVWXYZ23456789', s='';
+    for(var i=0;i<5;i++) s+=a[Math.floor(Math.random()*a.length)];
+    return s;
+  }
+  function showRoom(isHost){
+    $('rc').textContent=roomCode;
+    copyBtn.hidden=!isHost; lobby.hidden=true; room.hidden=false;
+  }
+  function wire(){
+    var c=conn;
+    function start(){
+      if(c!==conn) return;
+      clearTimeout(timer); live=true; reset(false);
+      restartBtn.disabled=false; showRoom(myColor===1);
+    }
+    if(c.open) start(); else c.on('open',start);
+    c.on('data',function(d){
+      if(c!==conn||!d) return;
+      if(d.t==='move'&&live&&!over&&turn!==myColor&&inb(d.r,d.c)&&g(d.r,d.c)===0) place(d.r,d.c);
+      else if(d.t==='restart'&&live) reset(true);
+    });
+    c.on('close',function(){
+      if(c!==conn) return;
+      backToLobby('對方已離線。你可以重新建立房間。');
+    });
+  }
+  function hasPeer(){
+    if(typeof Peer==='undefined'){say('連線元件載入失敗，請檢查網路後重新整理頁面。');return false}
+    return true;
+  }
+  function hostRoom(){
+    if(!hasPeer()) return;
+    cleanup(); reset(false); roomCode=genCode();
+    var p=peer=new Peer('gmk-'+roomCode);
+    p.on('open',function(){
+      if(p!==peer) return;
+      myColor=1; showRoom(true);
+      say('房間已建立。把代碼或邀請連結傳給朋友，等他加入…');
+    });
+    p.on('connection',function(c){
+      if(p!==peer) return;
+      if(conn){c.close();return}
+      conn=c; wire();
+    });
+    p.on('error',function(e){
+      if(p!==peer) return;
+      if(e.type==='unavailable-id') hostRoom();
+      else backToLobby('連線失敗（'+e.type+'），請再試一次。');
+    });
+  }
+  function joinRoom(code){
+    if(!hasPeer()) return;
+    code=(code||'').trim().toUpperCase();
+    if(code.length!==5){say('請輸入 5 個字元的房間代碼。');return}
+    cleanup(); reset(false); roomCode=code; say('連線中…');
+    var p=peer=new Peer();
+    p.on('open',function(){
+      if(p!==peer) return;
+      myColor=2;
+      conn=p.connect('gmk-'+roomCode,{reliable:true});
+      wire();
+      timer=setTimeout(function(){
+        if(!live) backToLobby('連線逾時。可能是網路限制，請確認代碼正確，或換一個網路（例如改用 Wi-Fi）再試。');
+      },15000);
+    });
+    p.on('error',function(e){
+      if(p!==peer) return;
+      if(e.type==='peer-unavailable') backToLobby('找不到房間「'+code+'」，請確認代碼，或請朋友重新建立房間。');
+      else backToLobby('連線失敗（'+e.type+'），請再試一次。');
+    });
+  }
+
+  function setMode(m){
+    cleanup(); mode=m;
+    aiPanel.hidden=m!=='ai'; lobby.hidden=m!=='online'; room.hidden=true;
+    if(m==='ai') newAI();
+    else {thinking=false; reset(false); say('點「建立房間」，或輸入朋友給你的代碼加入。')}
+  }
+
+  /* ---------- drawing ---------- */
+  function resize(){
+    size=Math.min(wrap.clientWidth,600); cell=size/(N+1);
+    var dpr=window.devicePixelRatio||1;
+    cv.style.width=size+'px'; cv.style.height=size+'px';
+    cv.width=Math.round(size*dpr); cv.height=Math.round(size*dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    draw();
+  }
+  function stone(x,y,p,alpha){
+    var rad=cell*0.44, gr=ctx.createRadialGradient(x-rad*.3,y-rad*.3,rad*.1,x,y,rad);
+    if(p===1){gr.addColorStop(0,'#555');gr.addColorStop(1,'#050505')}
+    else{gr.addColorStop(0,'#ffffff');gr.addColorStop(1,'#c9c9c9')}
+    ctx.save(); ctx.globalAlpha=alpha||1;
+    ctx.shadowColor='rgba(0,0,0,.4)'; ctx.shadowBlur=cell*.12; ctx.shadowOffsetY=cell*.05;
+    ctx.fillStyle=gr; ctx.beginPath(); ctx.arc(x,y,rad,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+  function draw(){
+    if(!size) return;
+    ctx.clearRect(0,0,size,size);
+    ctx.fillStyle='#d9b26b'; ctx.fillRect(0,0,size,size);
+    ctx.strokeStyle='#5b4423'; ctx.lineWidth=1;
+    for(var i=0;i<N;i++){
+      var p=cell*(i+1)+.5;
+      ctx.beginPath(); ctx.moveTo(cell,p); ctx.lineTo(cell*N,p); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(p,cell); ctx.lineTo(p,cell*N); ctx.stroke();
+    }
+    ctx.fillStyle='#5b4423';
+    [[3,3],[3,11],[11,3],[11,11],[7,7]].forEach(function(q){
+      ctx.beginPath(); ctx.arc(cell*(q[1]+1)+.5,cell*(q[0]+1)+.5,cell*.1,0,Math.PI*2); ctx.fill();
+    });
+    if(win){
+      var a=win[0], b=win[win.length-1];
+      ctx.strokeStyle='#d1432f'; ctx.lineWidth=cell*.12; ctx.lineCap='round';
+      ctx.beginPath(); ctx.moveTo(cell*(a[1]+1),cell*(a[0]+1)); ctx.lineTo(cell*(b[1]+1),cell*(b[0]+1)); ctx.stroke();
+    }
+    for(var r=0;r<N;r++) for(var c=0;c<N;c++){var v=g(r,c); if(v) stone(cell*(c+1),cell*(r+1),v)}
+    if(win) for(var k=0;k<win.length;k++) stone(cell*(win[k][1]+1),cell*(win[k][0]+1),g(win[k][0],win[k][1]));
+    if(hist.length&&!over){
+      var l=hist[hist.length-1];
+      ctx.fillStyle='#d1432f'; ctx.beginPath(); ctx.arc(cell*(l[1]+1),cell*(l[0]+1),cell*.1,0,Math.PI*2); ctx.fill();
+    }
+    if(hover&&canMove()&&g(hover[0],hover[1])===0) stone(cell*(hover[1]+1),cell*(hover[0]+1),turn,.45);
+  }
+  function cellAt(e){
+    var rect=cv.getBoundingClientRect();
+    var x=(e.clientX-rect.left)*(size/rect.width), y=(e.clientY-rect.top)*(size/rect.height);
+    var c=Math.round(x/cell-1), r=Math.round(y/cell-1);
+    return inb(r,c)?[r,c]:null;
+  }
+
+  /* ---------- events ---------- */
+  cv.addEventListener('pointermove',function(e){ if(e.pointerType==='mouse'){hover=cellAt(e);draw()} });
+  cv.addEventListener('pointerleave',function(){hover=null;draw()});
+  cv.addEventListener('pointerdown',function(e){
+    if(!canMove()) return;
+    var m=cellAt(e);
+    if(!m||g(m[0],m[1])!==0) return;
+    hover=null; place(m[0],m[1]);
+    if(mode==='online'){try{conn.send({t:'move',r:m[0],c:m[1]})}catch(x){}}
+    else maybeAI();
+  });
+  modeEl.addEventListener('change',function(){setMode(modeEl.value)});
+  levelEl.addEventListener('change',newAI);
+  sideEl.addEventListener('change',newAI);
+  $('newgame').addEventListener('click',newAI);
+  undoBtn.addEventListener('click',undo);
+  $('host').addEventListener('click',hostRoom);
+  $('join').addEventListener('click',function(){joinRoom(codeEl.value)});
+  codeEl.addEventListener('keydown',function(e){if(e.key==='Enter') joinRoom(codeEl.value)});
+  restartBtn.addEventListener('click',function(){
+    if(!live) return;
+    try{conn.send({t:'restart'})}catch(x){}
+    reset(true);
+  });
+  copyBtn.addEventListener('click',function(){
+    var url=location.origin+location.pathname+'?room='+roomCode;
+    function ok(){copyBtn.textContent='已複製';setTimeout(function(){copyBtn.textContent='複製邀請連結'},1800)}
+    if(navigator.clipboard&&navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(ok,function(){prompt('請複製這個連結：',url)});
+    else prompt('請複製這個連結：',url);
+  });
+  window.addEventListener('resize',resize);
+
+  resize(); newAI();
+  var q=new URLSearchParams(location.search).get('room');
+  if(q){modeEl.value='online'; setMode('online'); codeEl.value=q.toUpperCase(); joinRoom(q)}
+})();
+</script>
+</body>
+</html>
